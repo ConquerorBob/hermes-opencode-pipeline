@@ -1,6 +1,6 @@
-# Asymmetric Agentic Orchestration Pipeline
+# Asymmetric agentic orchestration pipeline
 
-A low-cost, high-speed multi-agent development architecture that pairs a high-level **Orchestrator** model with a zero-cost local **Execution Engine** for automated software engineering and local terminal management.
+This is the dev pipeline I use to keep token costs near zero on big build tasks. A paid orchestrator model handles the thinking; a free local worker model does the actual code writing. The orchestrator doesn't need to be good at writing code. It needs to plan, delegate, and read compiler output, so that's all I ask of it.
 
 ```
                   +-------------------------+
@@ -29,53 +29,55 @@ A low-cost, high-speed multi-agent development architecture that pairs a high-le
                   +-------------------------+
 ```
 
-The architecture is not a one-way pipeline: terminal and compiler output flow back up to the Orchestrator, which evaluates the result and either re-dispatches the Execution layer or reports completion.
+Worth spelling out that the arrows go both ways. Terminal and compiler output feeds back up to the orchestrator, which either sends more work down or calls the task done.
 
-## Architecture Overview
+## How it's put together
 
-The pipeline uses a two-tier hierarchy (a hierarchical multi-agent topology) to maximize compute efficiency and minimize token expenditure:
+**Orchestrator: GLM 5.3 Flash, via OpenRouter**
 
-1. **Orchestrator Layer (`GLM 5.3 Flash` via OpenRouter)**
-   - Manages top-level task decomposition and workflow logic.
-   - Generates minimal tool calls to delegate work to sub-agents.
-   - Evaluates terminal feedback and coordinates multi-step objectives.
+- Breaks the task into steps and decides what to delegate.
+- Reads terminal feedback and keeps the whole thing moving.
 
-2. **Execution Layer (`OpenCode` CLI running `openrouter/deepseek-v4.1-flash:free`)**
-   - Runs locally in sub-processes to execute heavy code generation and file edits.
-   - Invoked as one-shot runs, e.g.:
-     ```bash
-     opencode run --title "auth-module" \
-       -m openrouter/deepseek-v4.1-flash:free \
-       "Implement the JWT auth module in src/auth/ per the spec"
-     ```
-   - Interacts directly with local developer tools (`cargo`, `git`, `python`).
-   - Handles compiler diagnostic loops, fixing syntax and type errors automatically.
+**Worker: OpenCode CLI, running `openrouter/deepseek-v4.1-flash:free`**
 
-## Key Performance Characteristics
+- Runs locally as a one-shot subprocess per dispatch:
 
-- **Cost Efficiency:** High-volume output (code diffs, test generation, refactoring) is offloaded to the OpenRouter free worker tier, while the paid orchestrator model handles low-token control logic.
-- **Compiler-Gated Validation:** Tasks are expected to complete only when local verification passes (e.g., `cargo check` returns exit code `0`, unit tests pass). Note: this gate is a **prompt discipline**, not an enforced mechanism — the orchestrator's instructions must require it, and the operator should spot-check completions. Nothing in the pipeline enforces it automatically.
-- **Local Tool Automation:** Integrates with local terminal workflows and environment credentials (`gh`, `cargo`, `ssh`) for automated project scaffolding and version control pushing.
+  ```bash
+  opencode run --title "auth-module" \
+    -m openrouter/deepseek-v4.1-flash:free \
+    "Implement the JWT auth module in src/auth/ per the spec"
+  ```
 
-## Constraints & Failure Modes
+- Edits files, runs `cargo`/`git`/`python` directly, and chews through compiler errors on its own.
 
-- **Free-tier rate limits.** The worker model (`deepseek-v4.1-flash:free`) is subject to OpenRouter's free-tier request-per-minute and daily caps. Parallel dispatch of many sub-agents can exhaust the cap mid-task; the orchestrator should serialize heavy dispatches and treat rate-limit errors as retryable.
-- **Compiler error loops.** The Execution layer can spin on a compiler error it cannot fix (retrying the same failing change). Cap the number of fix attempts per dispatch; if the cap is hit, surface the failing diagnostics back to the orchestrator rather than retrying indefinitely.
-- **Worker output is unverified.** Sub-agent self-reports ("done", "all tests pass") are not ground truth. Treat the compiler/test exit code — not the agent's claim — as the completion signal.
-- **Context isolation.** Sub-agents know nothing about the parent conversation. Every dispatch must carry all needed context (file paths, constraints, spec) explicitly.
+## Why it's cheap
+
+Code diffs, test scaffolding, and refactors all come from the free tier, and that's the bulk of the output. The paid model only spends tokens on control logic, which is short.
+
+## The compiler gate
+
+The one rule that makes this actually work: nothing counts as done until local verification passes. `cargo check` exits 0, tests run green, or the task isn't finished.
+
+To be honest about how that's enforced: it isn't, not automatically. It's a rule the orchestrator's prompt has to state, and I still spot-check the results myself, because a sub-agent saying "all tests pass" means exactly nothing.
+
+It also plugs into the normal local workflow: `gh` for pushing, `cargo` for builds, `ssh` for deploys.
+
+## Where it breaks
+
+- OpenRouter's free tier has request caps. Firing off parallel sub-agents burns through them mid-task. Serialize the heavy dispatches and treat rate-limit errors as retryable.
+- The worker can get stuck in a loop on a compiler error it can't fix, retrying the same change forever. Cap the fix attempts per dispatch and send the failing diagnostics back up instead.
+- Sub-agents know nothing about the parent conversation. Every dispatch carries its own context: file paths, constraints, the spec.
 
 ## Quickstart
 
-### Prerequisites
+Prereqs:
 
-- **Hermes Agent:** installed (`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`).
-- **OpenCode CLI:** installed locally, with an OpenRouter API key configured for the free DeepSeek tier.
-- **GitHub CLI (`gh`):** installed and authenticated (only needed for push/version-control tasks).
-- **Rust Toolchain:** `rustc` and `cargo` installed (only needed for Rust tasks).
+- [Hermes Agent](https://hermes-agent.nousresearch.com/), installed with `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`
+- OpenCode CLI, with an OpenRouter key set up for the free DeepSeek tier
+- `gh` authenticated (only if the task pushes to GitHub)
+- Rust toolchain (only for Rust tasks)
 
-### Basic Usage
-
-To run a structured build task from the terminal:
+Run a build task like this:
 
 ```bash
 hermes chat -q --oneshot \
@@ -84,8 +86,6 @@ hermes chat -q --oneshot \
    and verify with cargo test before completion. Exit code 0 or report failure."
 ```
 
-The orchestrator reads this as a one-shot query, decomposes the work, dispatches `opencode run` sub-processes, and evaluates the returned compiler/test output.
+The orchestrator takes the query, splits it up, runs `opencode` subprocesses, and reads back what the compiler said.
 
-## License
-
-MIT
+MIT licensed, see [LICENSE](LICENSE).
